@@ -1,0 +1,105 @@
+# Base configuration
+seed: 42
+device: "cuda"
+optimize: False
+per_dataset: False
+use_kfold: False
+leave_one_out: False
+save_path: ./results
+expand_features: False
+
+model:
+  type: "GATv2" # Model architectures to test
+  activation: "leaky_relu" # Default activation
+  hidden_channels: 128 # Default hidden dimension
+  num_layers: 2 # Default number of layers
+  dropout: 0.3 # Default dropout rate
+  residual: True
+  heads: 3
+  concat: True
+  use_edge_encoder: True
+  edge_encoder_channels: 32
+  edge_encoder_layers: 2
+  use_classifier_mlp: True
+  classifier_mlp_channels: 32
+  classifier_mlp_layers: 2
+
+# Training configuration
+training:
+  learning_rate: 1e-2
+  batch_size: 512
+  max_epochs: 256
+  patience: 128
+  lr_patience: 32
+  lr_factor: 0.5
+  weight_decay: 1e-5
+  cv_folds: 3
+  mixed_precision: False
+  log_interval: 16
+
+# Hyperparameter search space
+hparams:
+  activation:
+    options: ["leaky_relu", "tanh", 'relu']
+  hidden_channels:
+    min: 64
+    max: 256
+  num_layers:
+    min: 1
+    max: 3
+  dropout:
+    min: 0.01
+    max: 0.8
+  residual:
+    options: [True, False]
+  heads:
+    min: 1
+    max: 3
+  concat:
+    options: [True, False]
+  use_edge_encoder:
+    options: [True, False]
+  edge_encoder_channels:
+    min: 16
+    max: 64
+  edge_encoder_layers:
+    min: 1
+    max: 2
+  use_classifier_mlp:
+    options: [True, False]
+  classifier_mlp_channels:
+    min: 16
+    max: 64
+  classifier_mlp_layers:
+    min: 1
+    max: 3
+  learning_rate:
+    min: 1e-5
+    max: 1e-1
+
+# Optuna configuration
+optuna:
+  n_trials: 8
+  n_startup_trials: 1
+  n_warmup_steps: 4
+  timeout: 86400 # 24 hours in seconds
+
+data:
+  dataset_path: "data/tabular/"
+  dataset_size: 1.0
+  datasets: null
+  trial_idx: null
+  sparsify: null
+  node_features: null
+
+# XGBoost configuration
+xgboost:
+  max_depth: 6
+  learning_rate: 0.1
+  n_estimators: 100
+  subsample: 0.8
+  colsample_bytree: 0.8
+  random_state: 42
+  gridsearch:
+    enabled: true
+    cv_folds: 5
