@@ -1,7 +1,7 @@
 import csv
 import json
 import logging
-import pickle  # noqa: S403
+import pickle
 import time
 import traceback
 import warnings
@@ -116,10 +116,10 @@ def train_xgboost_model(X_train, y_train, X_val, y_val, logger, from_config=Fals
     model = xgb.XGBClassifier(**default_params)
 
     # Only use eval_set if validation data is different from training data
-    # Check if validation data is actually different (not just same reference)
-    if len(X_val) != len(X_train) or not np.array_equal(
-        X_val.to_numpy() if hasattr(X_val, "values") else X_val,
-        X_train.to_numpy() if hasattr(X_train, "values") else X_train,
+    min_samples_per_class = min(np.bincount(y_train))
+    if (
+        len(y_train) >= SMALL_DATASET_LEN
+        and min_samples_per_class >= MIN_SAMPLES_PER_CLASS
     ):
         eval_set = [(X_train, y_train), (X_val, y_val)]
         model.fit(X_train, y_train, eval_set=eval_set, verbose=False)
@@ -283,8 +283,8 @@ def main_loop(cfg: DictConfig, dataset_name: str, base_dir: Path, dataset_path: 
             X_test = []
             y_test = []
             for _dataset_name in dataset_path:
-                data = pd.read_csv(dataset_name)
-                data_split = pd.read_csv(_dataset_name.replace(".node_features.csv", ".graph.csv"))
+                data = pd.read_csv(_dataset_name)
+                data_split = pd.read_csv(str(_dataset_name).replace(".node_features.csv", ".graph.csv"))
                 train_data = data.loc[
                     ~data_split.iloc[-1, 2:].astype(bool).reset_index(drop=True), :
                 ]
@@ -301,9 +301,8 @@ def main_loop(cfg: DictConfig, dataset_name: str, base_dir: Path, dataset_path: 
             y_test = pd.concat(y_test, ignore_index=True)
 
             # Validate that target contains only binary values
-            # TODO: requires fix  # noqa: TD002
-            unique_train = set(y_train.unique())  # type: ignore
-            unique_test = set(y_test.unique())  # type: ignore
+            unique_train = set(y_train.unique())
+            unique_test = set(y_test.unique())
             if not unique_train.issubset({0, 1}) or not unique_test.issubset({0, 1}):
                 logger.error(
                     "Target contains non-binary values. "
@@ -475,22 +474,23 @@ def main(cfg: DictConfig) -> None:
     """XGBoost training script for tabular data"""
 
     # Initialize output directory
-    base_dir = Path(cfg.save_path) / "logs" / str(cfg.data.dataset_size)
+    # Include fold in path, if provided
+    if cfg.data.fold is not None:
+        base_dir = Path(cfg.save_path) / "logs" / str(cfg.data.dataset_size) / f"fold_{cfg.data.fold}"
+    else:
+        base_dir = Path(cfg.save_path) / "logs" / str(cfg.data.dataset_size)
 
     # Load datasets
+    data_base_path = Path(f"{cfg.data.dataset_path}/csv_{cfg.data.dataset_size}")
+
     if cfg.expand_features:
-        dataset_paths = list(
-            Path(f"{cfg.data.dataset_path}/csv_{cfg.data.dataset_size}/noisy").glob(
-                "*.node_features.csv"
-            )
-        )
-    else:
-        dataset_paths = list(
-            Path(f"{cfg.data.dataset_path}/csv_{cfg.data.dataset_size}").glob(
-                "*.node_features.csv"
-            )
-        )
-    dataset_names = [path.stem for path in dataset_paths]
+        data_base_path = data_base_path / "noisy"
+
+    if cfg.data.fold is not None:
+        data_base_path = data_base_path / f"fold_{cfg.data.fold}"
+    
+    dataset_paths = list(data_base_path.glob("*.node_features.csv"))
+    dataset_names = [path.stem.split('.')[0] for path in dataset_paths]
 
     if cfg.per_dataset:
         # Process each dataset separately
@@ -498,9 +498,9 @@ def main(cfg: DictConfig) -> None:
             cur_dir = base_dir / dataset_name
             main_loop(cfg, dataset_name, cur_dir, dataset_paths[i])
     else:
-        cur_dir = base_dir / "combined_datasets"
+        cur_dir = base_dir / "foundation_dataset"
         # Process combined data
-        main_loop(cfg, "combined_datasets", cur_dir, dataset_paths)
+        main_loop(cfg, "foundation_dataset", cur_dir, dataset_paths)
 
 
 if __name__ == "__main__":
