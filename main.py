@@ -361,8 +361,16 @@ def main_loop(cfg: DictConfig, selected_data, base_dir):
                 logger.info(f"Best ROC-AUC: {study.best_value:.4f}")
 
                 # Final training with best parameters
-                cfg.model.update(best_params.get("model", {}))
-                cfg.training.update(best_params.get("training", {}))
+                # Optuna returns flat dict, need to split into model and training params
+                model_params = {
+                    k: v for k, v in best_params.items() 
+                    if k != "learning_rate"
+                }
+                training_params = {
+                    "learning_rate": best_params.get("learning_rate")
+                }
+                cfg.model.update(model_params)
+                cfg.training.update(training_params)
 
             # Data loaders
             train_loader = DataLoader(
@@ -420,12 +428,18 @@ def main_loop(cfg: DictConfig, selected_data, base_dir):
                     model_dir,
                 )
 
-                # Final evaluation
-                test_metrics = trainer.evaluate(model, test_loader, criterion)
+                # Find optimal threshold on validation data
+                logger.info("Finding optimal threshold on validation data...")
+                optimal_threshold = trainer.find_optimal_threshold(model, val_loader, criterion, metric="f1")
+                logger.info(f"Optimal threshold (F1-optimized): {optimal_threshold:.4f}")
+
+                # Final evaluation with optimal threshold
+                test_metrics = trainer.evaluate(model, test_loader, criterion, threshold=optimal_threshold)
 
                 # Log results
                 logger.info(f"\n{'=' * 50}")
                 logger.info(f"FINAL RESULTS: model_type={model_type}")
+                logger.info(f"Optimal threshold (from validation): {optimal_threshold:.4f}")
                 logger.info(f"Global Test ROC-AUC: {test_metrics['roc_auc']:.4f}")
                 logger.info(f"Global Test F1: {test_metrics['f1']:.4f}")
                 # Log per-dataset metrics

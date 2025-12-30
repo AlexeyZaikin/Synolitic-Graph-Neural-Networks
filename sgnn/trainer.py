@@ -5,6 +5,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
@@ -69,13 +70,13 @@ class GNNTrainer:
         return total_loss / len(loader.dataset), all_probs, all_labels  # type: ignore
 
     @torch.no_grad()
-    def evaluate(
+    def get_predictions(
         self, model: nn.Module, loader: DataLoader, criterion: nn.Module
-    ) -> dict[str, float]:
-        """Comprehensive model evaluation with per-dataset metrics"""
+    ) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
+        """Get predictions and probabilities from model"""
         model.eval()
         total_loss = 0
-        all_probs, all_preds, all_labels = [], [], []
+        all_probs, all_labels = [], []
         all_dataset_names = []  # Track dataset names
 
         for batch in loader:
@@ -85,16 +86,74 @@ class GNNTrainer:
 
             total_loss += loss.item() * batch_device.num_graphs
             probs = F.softmax(out, dim=1).detach().cpu()
-            preds = probs.argmax(dim=1)
 
             all_probs.append(probs)
-            all_preds.append(preds)
             all_labels.append(batch_device.y.cpu())
             all_dataset_names.extend(batch_device.dataset_name)  # Collect dataset names
 
         all_probs = torch.cat(all_probs)
-        all_preds = torch.cat(all_preds)
         all_labels = torch.cat(all_labels)
+
+        return all_probs, all_labels, all_dataset_names
+
+    @torch.no_grad()
+    def find_optimal_threshold(
+        self, model: nn.Module, loader: DataLoader, criterion: nn.Module, metric: str = "f1"
+    ) -> float:
+        """Find optimal threshold for binary classification based on validation data"""
+        all_probs, all_labels, _ = self.get_predictions(model, loader, criterion)
+        
+        labels_np = all_labels.numpy()
+        probs_np = all_probs.numpy()[:, 1]
+        
+        thresholds = np.linspace(0.0, 1.0, 101)
+        
+        best_threshold = 0.5
+        best_score = -1.0
+        
+        for threshold in thresholds:
+            y_pred = (probs_np >= threshold).astype(int)
+            
+            if metric == "f1":
+                score = f1_score(labels_np, y_pred, average="binary", pos_label=1, zero_division=0)
+            else:
+                raise ValueError(f"Unknown metric for threshold optimization: {metric}")
+            
+            if score > best_score:
+                best_score = score
+                best_threshold = threshold
+        
+        return best_threshold
+
+    @torch.no_grad()
+    def evaluate(
+        self, model: nn.Module, loader: DataLoader, criterion: nn.Module, threshold: float | None = None
+    ) -> dict[str, float]:
+        """Comprehensive model evaluation with per-dataset metrics"""
+        model.eval()
+        total_loss = 0
+        all_probs, all_labels = [], []
+        all_dataset_names = []  # Track dataset names
+
+        for batch in loader:
+            batch_device = batch.to(self.device)
+            out = model(batch_device)
+            loss = criterion(out, batch_device.y.long())
+
+            total_loss += loss.item() * batch_device.num_graphs
+            probs = F.softmax(out, dim=1).detach().cpu()
+
+            all_probs.append(probs)
+            all_labels.append(batch_device.y.cpu())
+            all_dataset_names.extend(batch_device.dataset_name)  # Collect dataset names
+
+        all_probs = torch.cat(all_probs)
+        all_labels = torch.cat(all_labels)
+
+        if threshold is not None:
+            all_preds = (all_probs[:, 1] >= threshold).long()
+        else:
+            all_preds = all_probs.argmax(dim=1)
 
         # Compute global metrics
         global_metrics = self._compute_metrics(all_probs, all_preds, all_labels)
@@ -110,8 +169,12 @@ class GNNTrainer:
         for dataset in unique_datasets:
             mask = [ds == dataset for ds in all_dataset_names]
             dataset_probs = all_probs[mask]
-            dataset_preds = all_preds[mask]
             dataset_labels = all_labels[mask]
+            
+            if threshold is not None:
+                dataset_preds = (dataset_probs[:, 1] >= threshold).long()
+            else:
+                dataset_preds = dataset_probs.argmax(dim=1)
 
             if len(dataset_probs) > 0:  # Only compute if data exists
                 dataset_metrics = self._compute_metrics(
