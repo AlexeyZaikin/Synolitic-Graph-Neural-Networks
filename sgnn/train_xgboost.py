@@ -340,9 +340,12 @@ def main_loop(cfg: DictConfig, dataset_name: str, base_dir: Path, dataset_path: 
             y_train = []
             X_test = []
             y_test = []
-            for _dataset_name in dataset_path:
-                data = pd.read_csv(_dataset_name)
-                data_split = pd.read_csv(str(_dataset_name).replace(".node_features.csv", ".graph.csv"))
+            test_dataset_names = []  # Track which dataset each test sample belongs to
+            for _dataset_path in dataset_path:
+                # Extract dataset name from path
+                _dataset_name = Path(_dataset_path).stem.split('.')[0]
+                data = pd.read_csv(_dataset_path)
+                data_split = pd.read_csv(str(_dataset_path).replace(".node_features.csv", ".graph.csv"))
                 train_data = data.loc[
                     ~data_split.iloc[-1, 2:].astype(bool).reset_index(drop=True), :
                 ]
