@@ -194,13 +194,13 @@ class GNNModel(nn.Module):
             if self.use_edge_encoders:
                 edge_attr = self.edge_encoders[i](edge_attr)
             if self.model_type == "GCN" and edge_attr is not None:
-                edge_attr[edge_attr < 0] = 0
+                edge_attr = torch.clamp(edge_attr, min=0)
             x = layer(x, edge_index, edge_attr)
             x = self.norm(x, batch)
             # Apply activation
             x = self.activation(x)
             if x_res is not None:
-                x += x_res
+                x = x + x_res
 
         # Global pooling and classification
         x = global_mean_pool(x, batch)

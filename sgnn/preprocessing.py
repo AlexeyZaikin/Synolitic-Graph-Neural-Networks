@@ -13,26 +13,39 @@ warnings.filterwarnings("ignore")
 
 
 def prepare_tabular(args):
+    # Determine base path based on noisy flag
+    if args.noisy:
+        # For noisy data, check if we have fold structure in noisy directory
+        base_path = Path(args.data_path) / f"csv_{args.data_size}" / "noisy"
+    else:
+        base_path = Path(args.data_path) / f"csv_{args.data_size}"
+    
+    # Check if fold directories exist (for all data sizes)
+    fold_dirs = sorted([d for d in base_path.iterdir() if d.is_dir() and d.name.startswith("fold_")])
+    
+    if fold_dirs:
+        # Process each fold directory
+        for fold_dir in tqdm(fold_dirs, desc="Processing folds"):
+            _process_single_directory(fold_dir, fold_dir)
+    else:
+        # No folds found, process as before (backward compatibility)
+        _process_single_directory(base_path, base_path)
+
+
+def _process_single_directory(data_dir: Path, output_dir: Path):
+    """Process graph data from a single directory and save processed_graphs.pkl"""
     datasets = set()
     datasets.update(
-        str(p).split("/")[-1].split(".")[0]
-        for p in (Path(args.data_path) / (f"csv_{args.data_size}" if not args.noisy else "")).glob(
-            "*.csv"
-        )
+        p_i.stem.split(".")[0]
+        for p_i in data_dir.glob("*.graph.csv")
     )
 
     all_data = {}
-    for dataset in tqdm(datasets, desc="Graph structure building"):
+    for dataset in tqdm(datasets, desc="Graph structure building", leave=False):
         all_data[dataset] = defaultdict(list)
-        graph_data = pd.read_csv(
-            Path(args.data_path)
-            / (f"csv_{args.data_size}" if not args.noisy else "")
-            / f"{dataset}.graph.csv",
-        )
+        graph_data = pd.read_csv(data_dir / f"{dataset}.graph.csv")
         node_features_data = pd.read_csv(
-            Path(args.data_path)
-            / (f"csv_{args.data_size}" if not args.noisy else "")
-            / f"{dataset}.node_features.csv",
+            data_dir / f"{dataset}.node_features.csv",
             index_col=0,
         )
         # Get the graph columns (exclude p1, p2, feature columns, and is_in_test)
@@ -68,11 +81,7 @@ def prepare_tabular(args):
             else:
                 all_data[dataset]["train"].append(data)
 
-    with (
-        Path(args.data_path)
-        / (f"csv_{args.data_size}" if not args.noisy else "")
-        / "processed_graphs.pkl"
-    ).open("wb") as f:
+    with (output_dir / "processed_graphs.pkl").open("wb") as f:
         pickle.dump(all_data, f)
 
 

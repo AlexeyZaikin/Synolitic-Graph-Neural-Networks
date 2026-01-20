@@ -1,6 +1,4 @@
 import argparse
-import glob
-import os
 import pathlib
 
 import numpy as np
@@ -10,12 +8,36 @@ from tqdm import tqdm
 
 
 def main(args):
-    pathlib.Path(os.path.join(args.data_path, "csv_1.0", "noisy")).mkdir(
-        exist_ok=True, parents=True
-    )
+    base_path = pathlib.Path(args.data_path) / "csv_1.0"
+    
+    # Check if fold directories exist
+    fold_dirs = sorted([d for d in base_path.iterdir() if d.is_dir() and d.name.startswith("fold_")])
+    
+    if fold_dirs:
+        # Process each fold directory
+        for fold_dir in tqdm(fold_dirs, desc="Processing folds"):
+            _process_fold(args, fold_dir)
+    else:
+        _process_fold(args, base_path)
+
+
+def _process_fold(args, data_dir: pathlib.Path):
+    """Process a single fold or the base directory for feature expansion."""
+    # Determine output directory
+    if data_dir.name.startswith("fold_"):
+        # This is a fold directory
+        output_dir = data_dir.parent / "noisy" / data_dir.name
+        input_dir = data_dir
+    else:
+        # This is the base directory
+        output_dir = data_dir / "noisy"
+        input_dir = data_dir
+    
+    pathlib.Path(output_dir).mkdir(exist_ok=True, parents=True)
+    
     # Load data with frac = 1.0
-    dataset_paths = glob.glob(f"{args.data_path}/csv_1.0/*.node_features.csv")
-    for dataset_path in tqdm(dataset_paths, desc="Expanding dimensions"):
+    dataset_paths = list(input_dir.glob("*.node_features.csv"))
+    for dataset_path in tqdm(dataset_paths, desc="Expanding dimensions", leave=False):
         df = pd.read_csv(dataset_path).iloc[:, 1:]
         # Record the list of original columns
         original_cols = [c for c in df.columns if c != "target"]
@@ -31,7 +53,8 @@ def main(args):
         # Get the numeric columns (all columns except the target)
         numeric_cols = [col for col in df.columns if col != "target"]
         # Obtain test ids
-        graph_df = pd.read_csv(dataset_path.replace(".node_features.csv", ".graph.csv"))
+        graph_path = dataset_path.parent / dataset_path.name.replace(".node_features.csv", ".graph.csv")
+        graph_df = pd.read_csv(graph_path)
         test_ids = np.array(list(graph_df.columns[2:]))[graph_df.iloc[-1, 2:].values == 1].astype(
             int
         )
@@ -74,21 +97,12 @@ def main(args):
 
         gr.graph_df.loc[gr.graph_df.shape[0]] = train_col
 
-        # Save the results to a CSV file
-        path_to_save = os.path.join(
-            args.data_path,
-            "csv_1.0",
-            "noisy",
-            dataset_path.split("/")[-1].split(".")[0] + ".graph" + ".csv",
-        )
+        # Save the results to CSV files
+        base_name = dataset_path.stem.split(".")[0]
+        path_to_save = output_dir / f"{base_name}.graph.csv"
         gr.graph_df.to_csv(path_to_save, index=False)
 
-        df_path_to_save = os.path.join(
-            args.data_path,
-            "csv_1.0",
-            "noisy",
-            dataset_path.split("/")[-1].split(".")[0] + ".node_features" + ".csv",
-        )
+        df_path_to_save = output_dir / f"{base_name}.node_features.csv"
         # Add target back to features_df before saving
         features_df_with_target = features_df.copy()
         features_df_with_target["target"] = target

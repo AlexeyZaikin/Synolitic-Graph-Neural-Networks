@@ -11,7 +11,7 @@ from scipy.io import loadmat
 from sklearn.base import ClassifierMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.svm import SVC
 from tqdm import tqdm
@@ -209,7 +209,55 @@ def get_df_by_frac(frac: float) -> float:
         return 0.2
     if frac == 0.05:
         return 0.1
+    if frac == 0.01:
+        return 0.05
     raise ValueError(f"Fraction {frac} not supported")
+
+
+def _build_and_save_graph(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    features_df: pd.DataFrame,
+    target: pd.Series,
+    numeric_cols: list,
+    base_name: str,
+    output_path: pathlib.Path,
+) -> None:
+    """Build Synolitic graph and save results to CSV files."""
+    # Create a Synolitic object
+    gr = Synolitic(
+        classifier_str="svc",
+        probability=True,
+        random_state=37,
+        numeric_cols=numeric_cols,
+        category_cols=None,
+    )
+
+    # Fit the Synolitic model on the training data
+    gr.fit(X_train=X_train, y_train=y_train)
+
+    # Predict the labels for all data
+    _ = gr.predict(X_test=features_df)
+
+    # Add train/test indicator row
+    train_col = ["is_in_test", "-"]
+    for i in gr.graph_df.columns[2:]:
+        if int(i) not in list(X_train.index):
+            train_col.append(1)
+        else:
+            train_col.append(0)
+
+    gr.graph_df.loc[gr.graph_df.shape[0]] = train_col
+
+    # Save the results to CSV files
+    path_to_save = output_path / f"{base_name}.graph.csv"
+    gr.graph_df.to_csv(path_to_save, index=False)
+
+    df_path_to_save = output_path / f"{base_name}.node_features.csv"
+    # Add target back to features_df before saving
+    features_df_with_target = features_df.copy()
+    features_df_with_target["target"] = target
+    features_df_with_target.to_csv(df_path_to_save, index=True)
 
 
 def main(args):
@@ -254,83 +302,130 @@ def main(args):
             features_df = df.drop(columns=["target"])
             # Get the target column
             target = df["target"]
-            # Perform splitting into train and test
-            X_train, X_test, y_train, y_test = train_test_split(
-                features_df, target, test_size=0.1, random_state=42, stratify=target
+            
+            # Use StratifiedKFold for cross-validation
+            skf = StratifiedKFold(
+                n_splits=args.n_folds, shuffle=True, random_state=42
             )
+            
+            # Process each fold
+            for fold_idx, (train_idx, test_idx) in enumerate(
+                skf.split(features_df, target)
+            ):
+                # Create fold directory
+                fold_dir = pathlib.Path(
+                    output_dir + f"/csv_{args.data_size}/fold_{fold_idx}"
+                )
+                fold_dir.mkdir(exist_ok=True, parents=True)
+                
+                # Split data for this fold
+                X_train = features_df.iloc[train_idx].copy()
+                X_test = features_df.iloc[test_idx].copy()
+                y_train = target.iloc[train_idx].copy()
+                y_test = target.iloc[test_idx].copy()
+                
+                # Combine all data for graph building
+                features_df_fold = pd.concat([X_train, X_test])
+                target_fold = pd.concat([y_train, y_test])
+                
+                # Reset indices for proper graph construction
+                X_train = X_train.reset_index(drop=True)
+                X_test = X_test.reset_index(drop=True)
+                features_df_fold = features_df_fold.reset_index(drop=True)
+                target_fold = target_fold.reset_index(drop=True)
+                
+                # Set indices for train/test separation
+                X_train.index = range(len(X_train))
+                X_test.index = range(len(X_train), len(X_train) + len(X_test))
+                
+                # Build and save graph
+                base_name = filename.split(".")[0]
+                _build_and_save_graph(
+                    X_train=X_train,
+                    y_train=y_train,
+                    features_df=features_df_fold,
+                    target=target_fold,
+                    numeric_cols=numeric_cols,
+                    base_name=base_name,
+                    output_path=fold_dir,
+                )
         elif args.data_size != 1.0:
-            # Obtain train ids
-            path = (
-                output_dir
-                + f"/csv_{get_df_by_frac(args.data_size)}/{filename.split('.')[0]}.graph.csv"
-            )
-            df = pd.read_csv(path)
-            selected_ids = np.array(list(df.columns[2:]))[df.iloc[-1, 2:].values == 0].astype(int)
-            orig_df = pd.read_csv(f"{output_dir}/csv/{filename}").iloc[:, 1:]
-            train_df = orig_df.loc[selected_ids, :]
-            # Obtain test ids
-            test_ids = np.array(list(df.columns[2:]))[df.iloc[-1, 2:].values == 1].astype(int)
-            test_df = orig_df.loc[test_ids, :]
-            # Train slice
-            train_df = train_df.groupby("target", group_keys=False).sample(
-                frac=args.data_size / get_df_by_frac(args.data_size), random_state=42
-            )
-            train_df = train_df.sample(frac=1, random_state=42)
+            prev_data_size = get_df_by_frac(args.data_size)
+            base_name = filename.split(".")[0]
+            
+            # Process each fold
+            for fold_idx in range(args.n_folds):
+                prev_path = pathlib.Path(
+                    output_dir + f"/csv_{prev_data_size}/fold_{fold_idx}/{base_name}.graph.csv"
+                )
+                if not prev_path.exists():
+                    continue
+                
+                # Read the graph data from previous size for this fold
+                df = pd.read_csv(prev_path)
+                selected_ids = np.array(list(df.columns[2:]))[df.iloc[-1, 2:].values == 0].astype(int)
+                orig_df = pd.read_csv(f"{output_dir}/csv/{filename}").iloc[:, 1:]
+                train_df_orig = orig_df.loc[selected_ids, :]
+                
+                # Obtain test ids
+                test_ids = np.array(list(df.columns[2:]))[df.iloc[-1, 2:].values == 1].astype(int)
+                test_df = orig_df.loc[test_ids, :]
+                
+                # Train slice
+                train_df = train_df_orig.groupby("target", group_keys=False).sample(
+                    frac=args.data_size / prev_data_size, random_state=42
+                )
+                
+                # If no samples after slice, take one sample with target 0 and one with target 1
+                if len(train_df) == 0:
+                    samples = []
+                    for target_val in [0, 1]:
+                        target_samples = train_df_orig[train_df_orig["target"] == target_val]
+                        if len(target_samples) > 0:
+                            samples.append(target_samples.sample(n=1, random_state=42))
+                    train_df = pd.concat(samples)
+                else:
+                    train_df = train_df.sample(frac=1, random_state=42)
+                
+                # Check if all samples are of one class, add one sample of the other class
+                unique_targets = train_df["target"].unique()
+                if len(unique_targets) == 1:
+                    missing_target = 1 - unique_targets[0]
+                    missing_samples = train_df_orig[train_df_orig["target"] == missing_target]
+                    # if len(missing_samples) > 0:
+                    train_df = pd.concat([train_df, missing_samples.sample(n=1, random_state=42)])
+                    train_df = train_df.sample(frac=1, random_state=42).reset_index(drop=True)
 
-            # Update Xtrain and ytrain
-            y_train = train_df["target"]
-            X_train = train_df.drop(columns=["target"])
+                # Update Xtrain and ytrain
+                y_train = train_df["target"]
+                X_train = train_df.drop(columns=["target"])
 
-            y_test = test_df["target"]
-            X_test = test_df.drop(columns=["target"])
+                y_test = test_df["target"]
+                X_test = test_df.drop(columns=["target"])
 
-            # Update features_df and target
-            features_df = pd.concat([X_train, X_test])
-            target = pd.concat([y_train, y_test])
+                # Update features_df and target
+                features_df = pd.concat([X_train, X_test])
+                target = pd.concat([y_train, y_test])
 
-            # Get the numeric columns (all columns except the target)
-            numeric_cols = [col for col in train_df.columns if col != "target"]
+                # Get the numeric columns (all columns except the target)
+                numeric_cols = [col for col in train_df.columns if col != "target"]
 
-        # Create a Synolitic object
-        gr = Synolitic(
-            classifier_str="svc",
-            probability=True,
-            random_state=37,
-            numeric_cols=numeric_cols,
-            category_cols=None,
-        )
+                # Create fold directory for current data size
+                fold_dir = pathlib.Path(
+                    output_dir + f"/csv_{args.data_size}/fold_{fold_idx}"
+                )
+                fold_dir.mkdir(exist_ok=True, parents=True)
 
-        # Fit the Synolitic model on the training data
-        gr.fit(X_train=X_train, y_train=y_train)
-
-        # Predict the labels for the test data
-        _ = gr.predict(X_test=features_df)
-
-        # Add train/test indicator row
-        train_col = ["is_in_test", "-"]
-        for i in gr.graph_df.columns[2:]:
-            if int(i) not in list(X_train.index):
-                train_col.append(1)
-            else:
-                train_col.append(0)
-
-        gr.graph_df.loc[gr.graph_df.shape[0]] = train_col
-
-        # Save the results to a CSV file
-        path_to_save = os.path.join(
-            output_dir + f"/csv_{args.data_size}/",
-            path.split("/")[-1].split(".")[0] + ".graph" + ".csv",
-        )
-        gr.graph_df.to_csv(path_to_save, index=False)
-
-        df_path_to_save = os.path.join(
-            output_dir + f"/csv_{args.data_size}/",
-            path.split("/")[-1].split(".")[0] + ".node_features" + ".csv",
-        )
-        # Add target back to features_df before saving
-        features_df_with_target = features_df.copy()
-        features_df_with_target["target"] = target
-        features_df_with_target.to_csv(df_path_to_save, index=True)
+                # Build and save graph
+                _build_and_save_graph(
+                    X_train=X_train,
+                    y_train=y_train,
+                    features_df=features_df,
+                    target=target,
+                    numeric_cols=numeric_cols,
+                    base_name=base_name,
+                    output_path=fold_dir,
+                )
 
 
 if __name__ == "__main__":
@@ -338,5 +433,6 @@ if __name__ == "__main__":
     parser.add_argument("data_path", type=str)
     parser.add_argument("output_dir", type=str)
     parser.add_argument("--data_size", type=float, default=1.0)
+    parser.add_argument("--n_folds", type=int, default=5)
     args = parser.parse_args()
     main(args)

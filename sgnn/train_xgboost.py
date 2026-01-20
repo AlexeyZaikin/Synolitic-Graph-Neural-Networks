@@ -1,7 +1,7 @@
 import csv
 import json
 import logging
-import pickle  # noqa: S403
+import pickle
 import time
 import traceback
 import warnings
@@ -17,6 +17,7 @@ from omegaconf import DictConfig
 from sklearn.metrics import (
     accuracy_score,
     auc,
+    confusion_matrix,
     f1_score,
     precision_recall_curve,
     precision_score,
@@ -116,10 +117,10 @@ def train_xgboost_model(X_train, y_train, X_val, y_val, logger, from_config=Fals
     model = xgb.XGBClassifier(**default_params)
 
     # Only use eval_set if validation data is different from training data
-    # Check if validation data is actually different (not just same reference)
-    if len(X_val) != len(X_train) or not np.array_equal(
-        X_val.to_numpy() if hasattr(X_val, "values") else X_val,
-        X_train.to_numpy() if hasattr(X_train, "values") else X_train,
+    min_samples_per_class = min(np.bincount(y_train))
+    if (
+        len(y_train) >= SMALL_DATASET_LEN
+        and min_samples_per_class >= MIN_SAMPLES_PER_CLASS
     ):
         eval_set = [(X_train, y_train), (X_val, y_val)]
         model.fit(X_train, y_train, eval_set=eval_set, verbose=False)
@@ -216,6 +217,60 @@ def grid_search_xgboost(X_train, y_train, logger, cfg=None):
     return best_model, best_params, best_score, search_time
 
 
+def find_optimal_threshold(y_true: np.ndarray, y_probs: np.ndarray, 
+                          thresholds: np.ndarray = None, 
+                          metric: str = 'f1') -> tuple[float, float]:
+    """Find threshold that maximizes specified metric on validation set
+    
+    Args:
+        y_true: True labels
+        y_probs: Predicted probabilities for positive class
+        thresholds: Array of thresholds to search (if None, uses 0.0 to 1.0)
+        metric: Metric to optimize ('f1', 'balanced_accuracy', 'youden', 'gmean')
+    
+    Returns:
+        best_threshold: Optimal threshold
+        best_score: Best score achieved
+    """
+    if thresholds is None:
+        thresholds = np.linspace(0.0, 1.0, 101)  # Search from 0.0 to 1.0
+    
+    best_score = -1
+    best_threshold = 0.5
+    
+    for threshold in thresholds:
+        y_pred = (y_probs >= threshold).astype(int)
+        
+        if metric == 'f1':
+            score = f1_score(y_true, y_pred, average='binary', pos_label=1, zero_division=0)
+        elif metric == 'balanced_accuracy':
+            # Balanced accuracy = (sensitivity + specificity) / 2
+            sensitivity = recall_score(y_true, y_pred, average='binary', pos_label=1, zero_division=0)
+            tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+            score = (sensitivity + specificity) / 2
+        elif metric == 'youden':
+            # Youden's J statistic = sensitivity + specificity - 1
+            sensitivity = recall_score(y_true, y_pred, average='binary', pos_label=1, zero_division=0)
+            tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+            score = sensitivity + specificity - 1
+        elif metric == 'gmean':
+            # Geometric mean = sqrt(sensitivity * specificity)
+            sensitivity = recall_score(y_true, y_pred, average='binary', pos_label=1, zero_division=0)
+            tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+            score = np.sqrt(sensitivity * specificity)
+        else:
+            raise ValueError(f"Unknown metric: {metric}")
+        
+        if score > best_score:
+            best_score = score
+            best_threshold = threshold
+    
+    return best_threshold, best_score
+
+
 def compute_metrics(y_true, y_pred, y_proba):
     """Calculate comprehensive classification metrics"""
     metrics = {
@@ -250,6 +305,9 @@ def main_loop(cfg: DictConfig, dataset_name: str, base_dir: Path, dataset_path: 
     logger.info(f"GridSearch enabled: {use_gridsearch}")
 
     try:
+        # Initialize test_dataset_names for per-dataset metrics tracking
+        test_dataset_names = np.array([])
+        
         # Load data
         if isinstance(dataset_path, (str, Path)):
             data = pd.read_csv(dataset_path)
@@ -282,9 +340,12 @@ def main_loop(cfg: DictConfig, dataset_name: str, base_dir: Path, dataset_path: 
             y_train = []
             X_test = []
             y_test = []
-            for _dataset_name in dataset_path:
-                data = pd.read_csv(dataset_name)
-                data_split = pd.read_csv(_dataset_name.replace(".node_features.csv", ".graph.csv"))
+            test_dataset_names = []  # Track which dataset each test sample belongs to
+            for _dataset_path in dataset_path:
+                # Extract dataset name from path
+                _dataset_name = Path(_dataset_path).stem.split('.')[0]
+                data = pd.read_csv(_dataset_path)
+                data_split = pd.read_csv(str(_dataset_path).replace(".node_features.csv", ".graph.csv"))
                 train_data = data.loc[
                     ~data_split.iloc[-1, 2:].astype(bool).reset_index(drop=True), :
                 ]
@@ -295,15 +356,17 @@ def main_loop(cfg: DictConfig, dataset_name: str, base_dir: Path, dataset_path: 
                 y_train.append(train_data["target"].astype(int))
                 X_test.append(test_data.drop("target", axis=1))
                 y_test.append(test_data["target"].astype(int))
+                # Track dataset name for each test sample
+                test_dataset_names.extend([_dataset_name] * len(test_data))
             X_train = pd.concat(X_train, ignore_index=True)
             y_train = pd.concat(y_train, ignore_index=True)
             X_test = pd.concat(X_test, ignore_index=True)
             y_test = pd.concat(y_test, ignore_index=True)
+            test_dataset_names = np.array(test_dataset_names)
 
             # Validate that target contains only binary values
-            # TODO: requires fix  # noqa: TD002
-            unique_train = set(y_train.unique())  # type: ignore
-            unique_test = set(y_test.unique())  # type: ignore
+            unique_train = set(y_train.unique())
+            unique_test = set(y_test.unique())
             if not unique_train.issubset({0, 1}) or not unique_test.issubset({0, 1}):
                 logger.error(
                     "Target contains non-binary values. "
@@ -336,10 +399,25 @@ def main_loop(cfg: DictConfig, dataset_name: str, base_dir: Path, dataset_path: 
                 X_train, y_train, logger, cfg
             )
 
+            # Create validation split for threshold optimization
+            min_samples_per_class = min(np.bincount(y_train))
+            if (
+                len(y_train) >= SMALL_DATASET_LEN
+                and min_samples_per_class >= MIN_SAMPLES_PER_CLASS
+            ):
+                X_train_final, X_val, y_train_final, y_val = train_test_split(
+                    X_train, y_train, test_size=0.1, random_state=24, stratify=y_train
+                )
+            else:
+                X_train_final = X_train
+                y_train_final = y_train
+                X_val = X_train
+                y_val = y_train
+
             # Train final model with best parameters on full training data
             logger.info("Training final model with best parameters on full training data...")
             start_time = time.time()
-            model.fit(X_train, y_train)
+            model.fit(X_train_final, y_train_final)
             train_time = (time.time() - start_time) / 60 + search_time
 
             # Log best parameters
@@ -389,18 +467,67 @@ def main_loop(cfg: DictConfig, dataset_name: str, base_dir: Path, dataset_path: 
             train_time = (time.time() - start_time) / 60
             best_params = xgb_params
             best_cv_score = None
-
-        # Predictions on test set
-        y_pred = model.predict(X_test)
+        # Find optimal threshold on validation data
+        optimal_threshold = 0.5
+        if X_val is not None and len(X_val) > 0 and y_val is not None and len(y_val) > 0:
+            logger.info("Finding optimal threshold on validation data...")
+            val_proba = model.predict_proba(X_val)[:, 1]
+            # Convert y_val to numpy array (handle both pandas and numpy)
+            if hasattr(y_val, 'to_numpy'):
+                val_labels = y_val.to_numpy()
+            elif hasattr(y_val, 'values'):
+                val_labels = y_val.values
+            else:
+                val_labels = np.array(y_val)
+            optimal_threshold, val_score = find_optimal_threshold(
+                val_labels, val_proba, metric='f1'
+            )
+            logger.info(f"Optimal threshold (F1-optimized): {optimal_threshold:.4f}")
+            logger.info(f"Validation F1 score at optimal threshold: {val_score:.4f}")
+        else:
+            logger.info("No validation data available, using default threshold 0.5")
+        # Get probabilities on test set
         y_proba = model.predict_proba(X_test)[:, 1]
+        # Use optimal threshold for predictions
+        y_pred = (y_proba >= optimal_threshold).astype(int)
+        
+        # Measure inference time on test set (for foundation_dataset)
+        inference_time = None
+        if dataset_name == "foundation_dataset":
+            # Warm-up run (to avoid first-run overhead)
+            _ = model.predict(X_test.iloc[:10] if hasattr(X_test, 'iloc') else X_test[:10])
+            _ = model.predict_proba(X_test.iloc[:10] if hasattr(X_test, 'iloc') else X_test[:10])
+            
+            # Measure inference time
+            start_time = time.time()
+            _ = model.predict_proba(X_test)[:, 1]
+            inference_time = time.time() - start_time
 
         # Compute metrics
         test_metrics = compute_metrics(y_test, y_pred, y_proba)
+
+        # Compute per-dataset metrics if we have multiple datasets
+        per_dataset_metrics = {}
+        if isinstance(dataset_path, list) and len(test_dataset_names) > 0:
+            # Convert to numpy arrays for consistent indexing
+            y_test_array = np.array(y_test) if not isinstance(y_test, np.ndarray) else y_test
+            y_pred_array = np.array(y_pred) if not isinstance(y_pred, np.ndarray) else y_pred
+            y_proba_array = np.array(y_proba) if not isinstance(y_proba, np.ndarray) else y_proba
+            
+            unique_datasets = np.unique(test_dataset_names)
+            for ds_name in unique_datasets:
+                mask = test_dataset_names == ds_name
+                if np.sum(mask) > 0:  # Only compute if data exists
+                    ds_y_test = y_test_array[mask]
+                    ds_y_pred = y_pred_array[mask]
+                    ds_y_proba = y_proba_array[mask]
+                    per_dataset_metrics[ds_name] = compute_metrics(ds_y_test, ds_y_pred, ds_y_proba)
 
         # Log results
         logger.info(f"\n{'=' * 50}")
         logger.info(f"FINAL RESULTS: {dataset_name}/XGBoost")
         logger.info(f"Data size: {data_size}")
+        logger.info(f"Optimal threshold (from validation): {optimal_threshold:.4f}")
         if use_gridsearch:
             logger.info(f"Best CV score: {best_cv_score:.4f}")
             logger.info(f"Best parameters: {best_params}")
@@ -412,6 +539,22 @@ def main_loop(cfg: DictConfig, dataset_name: str, base_dir: Path, dataset_path: 
         logger.info(f"Test F1: {test_metrics['f1']:.4f}")
         logger.info(f"Test Accuracy: {test_metrics['accuracy']:.4f}")
         logger.info(f"Test PR-AUC: {test_metrics['pr_auc']:.4f}")
+        
+        # Log per-dataset metrics if available
+        if per_dataset_metrics:
+            logger.info("\nPer-dataset metrics:")
+            dataset_metrics_sorted = sorted(
+                per_dataset_metrics.items(),
+                key=lambda x: x[1]["roc_auc"],
+                reverse=True,
+            )
+            for ds_name, metrics_dict in dataset_metrics_sorted:
+                logger.info(
+                    f"{ds_name}: ROC-AUC={metrics_dict['roc_auc']:.4f} | "
+                    f"F1={metrics_dict['f1']:.4f} | "
+                    f"Accuracy={metrics_dict['accuracy']:.4f}"
+                )
+        
         logger.info(f"Total time: {train_time:.2f} minutes")
         logger.info("=" * 50)
 
@@ -475,22 +618,23 @@ def main(cfg: DictConfig) -> None:
     """XGBoost training script for tabular data"""
 
     # Initialize output directory
-    base_dir = Path(cfg.save_path) / "logs" / str(cfg.data.dataset_size)
+    # Include fold in path, if provided
+    if cfg.data.fold is not None:
+        base_dir = Path(cfg.save_path) / "logs" / str(cfg.data.dataset_size) / f"fold_{cfg.data.fold}"
+    else:
+        base_dir = Path(cfg.save_path) / "logs" / str(cfg.data.dataset_size)
 
     # Load datasets
+    data_base_path = Path(f"{cfg.data.dataset_path}/csv_{cfg.data.dataset_size}")
+
     if cfg.expand_features:
-        dataset_paths = list(
-            Path(f"{cfg.data.dataset_path}/csv_{cfg.data.dataset_size}/noisy").glob(
-                "*.node_features.csv"
-            )
-        )
-    else:
-        dataset_paths = list(
-            Path(f"{cfg.data.dataset_path}/csv_{cfg.data.dataset_size}").glob(
-                "*.node_features.csv"
-            )
-        )
-    dataset_names = [path.stem for path in dataset_paths]
+        data_base_path = data_base_path / "noisy"
+
+    if cfg.data.fold is not None:
+        data_base_path = data_base_path / f"fold_{cfg.data.fold}"
+    
+    dataset_paths = list(data_base_path.glob("*.node_features.csv"))
+    dataset_names = [path.stem.split('.')[0] for path in dataset_paths]
 
     if cfg.per_dataset:
         # Process each dataset separately
@@ -498,9 +642,9 @@ def main(cfg: DictConfig) -> None:
             cur_dir = base_dir / dataset_name
             main_loop(cfg, dataset_name, cur_dir, dataset_paths[i])
     else:
-        cur_dir = base_dir / "combined_datasets"
+        cur_dir = base_dir / "foundation_dataset"
         # Process combined data
-        main_loop(cfg, "combined_datasets", cur_dir, dataset_paths)
+        main_loop(cfg, "foundation_dataset", cur_dir, dataset_paths)
 
 
 if __name__ == "__main__":

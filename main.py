@@ -27,7 +27,7 @@ from tqdm.auto import tqdm
 warnings.filterwarnings("ignore")
 
 
-def objective(trial: Trial, cfg: DictConfig, full_data: list[Data], log_dir: Path) -> float:  # noqa
+def objective(trial: Trial, cfg: DictConfig, full_data: list[Data], log_dir: Path, seed: int) -> float:
     """Optuna hyperparameter optimization objective"""
     logger = None
     tb_writer = None
@@ -208,7 +208,7 @@ def objective(trial: Trial, cfg: DictConfig, full_data: list[Data], log_dir: Pat
         fold_log_dir.mkdir(exist_ok=True)
         labels = [data.y for data in full_data]
         train_idx, val_idx = train_test_split(
-            np.arange(len(labels)), train_size=0.9, stratify=labels, random_state=trial_cfg.seed
+            np.arange(len(labels)), train_size=0.9, stratify=labels, random_state=seed
         )
         # Create data loaders
         train_loader = DataLoader(
@@ -349,7 +349,7 @@ def main_loop(cfg: DictConfig, selected_data, base_dir):
                 )
 
                 study.optimize(
-                    lambda trial: objective(trial, cfg, full_data, model_dir),
+                    lambda trial: objective(trial, cfg, full_data, model_dir, cfg.seed),
                     n_trials=cfg.optuna.n_trials,
                     timeout=cfg.optuna.timeout,
                     show_progress_bar=True,
@@ -361,8 +361,16 @@ def main_loop(cfg: DictConfig, selected_data, base_dir):
                 logger.info(f"Best ROC-AUC: {study.best_value:.4f}")
 
                 # Final training with best parameters
-                cfg.model.update(best_params.get("model", {}))
-                cfg.training.update(best_params.get("training", {}))
+                # Optuna returns flat dict, need to split into model and training params
+                model_params = {
+                    k: v for k, v in best_params.items() 
+                    if k != "learning_rate"
+                }
+                training_params = {
+                    "learning_rate": best_params.get("learning_rate")
+                }
+                cfg.model.update(model_params)
+                cfg.training.update(training_params)
 
             # Data loaders
             train_loader = DataLoader(
@@ -420,12 +428,18 @@ def main_loop(cfg: DictConfig, selected_data, base_dir):
                     model_dir,
                 )
 
-                # Final evaluation
-                test_metrics = trainer.evaluate(model, test_loader, criterion)
+                # Find optimal threshold on validation data
+                logger.info("Finding optimal threshold on validation data...")
+                optimal_threshold = trainer.find_optimal_threshold(model, val_loader, criterion, metric="f1")
+                logger.info(f"Optimal threshold (F1-optimized): {optimal_threshold:.4f}")
+
+                # Final evaluation with optimal threshold
+                test_metrics = trainer.evaluate(model, test_loader, criterion, threshold=optimal_threshold)
 
                 # Log results
                 logger.info(f"\n{'=' * 50}")
                 logger.info(f"FINAL RESULTS: model_type={model_type}")
+                logger.info(f"Optimal threshold (from validation): {optimal_threshold:.4f}")
                 logger.info(f"Global Test ROC-AUC: {test_metrics['roc_auc']:.4f}")
                 logger.info(f"Global Test F1: {test_metrics['f1']:.4f}")
                 # Log per-dataset metrics
@@ -466,15 +480,26 @@ def main_loop(cfg: DictConfig, selected_data, base_dir):
 def main(cfg: DictConfig) -> None:
     """Main experiment runner with Hydra configuration"""
     # Initialize output directory
-    base_dir = Path(cfg.save_path) / "logs" / str(cfg.data.dataset_size)
+    # Include fold in path, if provided
+    if cfg.data.fold is not None:
+        base_dir = Path(cfg.save_path) / "logs" / str(cfg.data.dataset_size) / f"fold_{cfg.data.fold}"
+    else:
+        base_dir = Path(cfg.save_path) / "logs" / str(cfg.data.dataset_size)
 
     # Load datasets
-    dataset_path = os.path.join(
+    path_parts = [
         cfg.data.dataset_path,
         f"csv_{cfg.data.dataset_size}",
-        "noisy" if cfg.expand_features else "",
-        "processed_graphs.pkl",
-    )
+    ]
+
+    if cfg.expand_features:
+        path_parts.append("noisy")
+    
+    if cfg.data.fold is not None:
+        path_parts.append(f"fold_{cfg.data.fold}")
+    
+    path_parts.append("processed_graphs.pkl")
+    dataset_path = os.path.join(*path_parts)
     dataset_names = cfg.data.datasets
     with Path(dataset_path).open("rb") as f:
         all_data = pickle.load(f)
@@ -500,13 +525,14 @@ def main(cfg: DictConfig) -> None:
             main_loop(cfg, selected_data, cur_dir)
     else:
         selected_data = {"train": [], "test": []}
+        cur_dir = base_dir / "foundation_dataset"
         if not dataset_names:
             dataset_names = list(all_data.keys())
             for dataset_name in tqdm(dataset_names, desc="Loading datasets"):
                 data = all_data[dataset_name]
                 selected_data["train"].extend(data["train"])
                 selected_data["test"].extend(data["test"])
-            main_loop(cfg, selected_data, base_dir)
+            main_loop(cfg, selected_data, cur_dir)
 
 
 if __name__ == "__main__":
