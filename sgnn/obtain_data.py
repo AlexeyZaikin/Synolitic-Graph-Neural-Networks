@@ -257,7 +257,7 @@ def _build_and_save_graph(
     # Add target back to features_df before saving
     features_df_with_target = features_df.copy()
     features_df_with_target["target"] = target
-    features_df_with_target.to_csv(df_path_to_save, index=True)
+    features_df_with_target.to_csv(df_path_to_save, index=False)
 
 
 def main(args):

@@ -1,6 +1,6 @@
 # Overcoming the Curse of Dimensionality with Synolitic AI
 
-This repository contains the implementation of experiments from the paper "Overcoming the Curse of Dimensionality with Synolitic AI". It provides a comprehensive pipeline for conducting experiments with synolitic graphs using Graph Neural Networks (GNNs) and XGBoost for classification tasks.
+This repository contains the implementation of experiments from the paper ["Overcoming the Curse of Dimensionality with Synolitic AI"](https://www.mdpi.com/2227-7080/14/2/84). It provides a comprehensive pipeline for conducting experiments with synolitic graphs using Graph Neural Networks (GNNs) and XGBoost for classification tasks.
 
 ## Overview
 
@@ -33,7 +33,7 @@ This project implements a comprehensive machine learning pipeline that:
 
 ### Setup
 
-1. Clone this repository and go to the `smiles_2025_sgnn` directory
+1. Clone this repository and go to the `sgnn` directory
 
 2. Install dependencies using UV:
 
