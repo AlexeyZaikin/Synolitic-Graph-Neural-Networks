@@ -180,3 +180,21 @@ Synolitic-Graph-Neural-Networks/
 - Model checkpoints are automatically saved during training
 - Comprehensive evaluation metrics (accuracy, F1-score, AUC-ROC)
 - Experimental results can be analyzed using the provided Jupyter notebook
+
+---
+
+#### BibTeX reference
+```
+@Article{technologies14020084,
+AUTHOR = {Zaikin, Alexey and Sviridov, Ivan and Sosedka, Artem and Linich, Anastasia and Nasyrov, Ruslan and Mirkes, Evgeny M. and Tyukina, Tatiana},
+TITLE = {Overcoming the Curse of Dimensionality with Synolitic AI},
+JOURNAL = {Technologies},
+VOLUME = {14},
+YEAR = {2026},
+NUMBER = {2},
+ARTICLE-NUMBER = {84},
+URL = {https://www.mdpi.com/2227-7080/14/2/84},
+ISSN = {2227-7080},
+DOI = {10.3390/technologies14020084}
+}
+```
